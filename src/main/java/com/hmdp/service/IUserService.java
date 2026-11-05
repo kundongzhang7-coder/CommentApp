@@ -32,4 +32,14 @@ public interface IUserService extends IService<User> {
      * 根据id查询用户信息（用于点击头像进入博主首页）
      */
     Result queryUserById(Long id);
+
+    /**
+     * 签到功能
+     */
+    Result sign();
+
+    /**
+     * 签到天数
+     */
+    Result signCount();
 }

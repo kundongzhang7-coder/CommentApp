@@ -64,19 +64,18 @@ public class ShopController {
      * 根据商铺类型分页查询商铺信息
      * @param typeId 商铺类型
      * @param current 页码
+     * @param sortBy 排序方式：空=按距离，comments=按人气，score=按评分
      * @return 商铺列表
      */
     @GetMapping("/of/type")
     public Result queryShopByType(
             @RequestParam("typeId") Integer typeId,
-            @RequestParam(value = "current", defaultValue = "1") Integer current
+            @RequestParam(value = "current", defaultValue = "1") Integer current,
+            @RequestParam(value = "x", required = false) Double x,
+            @RequestParam(value = "y", required = false) Double y,
+            @RequestParam(value = "sortBy", required = false) String sortBy
     ) {
-        // 根据类型分页查询
-        Page<Shop> page = shopService.query()
-                .eq("type_id", typeId)
-                .page(new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE));
-        // 返回数据
-        return Result.ok(page.getRecords());
+        return shopService.queryShopByType(typeId, current, x, y, sortBy);
     }
 
     /**

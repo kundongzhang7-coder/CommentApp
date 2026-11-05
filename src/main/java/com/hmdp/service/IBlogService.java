@@ -30,4 +30,19 @@ public interface IBlogService extends IService<Blog> {
     Result likeBlog(Long id);
 
     Result queryBlogLikes(Long id);
+
+    /**
+     * 根据用户id分页查询探店博文（进入博主首页用）
+     */
+    Result queryBlogByUserId(Long id, Integer current);
+
+    /**
+     * 保存探店博文
+     */
+    Result saveBlog(Blog blog);
+
+    /**
+     * 根据用户id查询探店博文
+     */
+    Result queryBlogOfFollow(Long max, Integer offset);
 }

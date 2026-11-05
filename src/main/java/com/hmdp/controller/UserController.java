@@ -83,4 +83,12 @@ public class UserController {
         // 返回
         return Result.ok(info);
     }
+
+    /**
+     * 根据id查询用户信息（点击头像进入博主首页）
+     */
+    @GetMapping("/{id}")
+    public Result queryUserById(@PathVariable("id") Long userId) {
+        return userService.queryUserById(userId);
+    }
 }

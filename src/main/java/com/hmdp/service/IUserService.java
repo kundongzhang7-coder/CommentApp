@@ -27,4 +27,9 @@ public interface IUserService extends IService<User> {
      * @param loginForm 登录参数，包含手机号、验证码；或者手机号、密码
      */
     Result login(LoginFormDTO loginForm, HttpSession session);
+
+    /**
+     * 根据id查询用户信息（用于点击头像进入博主首页）
+     */
+    Result queryUserById(Long id);
 }

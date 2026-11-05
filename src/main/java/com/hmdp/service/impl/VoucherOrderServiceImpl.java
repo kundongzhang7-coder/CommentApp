@@ -17,6 +17,7 @@ import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.connection.stream.*;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
@@ -24,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.annotation.PostConstruct;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Collections;
@@ -72,6 +74,15 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @PostConstruct
     public void init() {
+        try {
+            // 启动自愈：确保消费组存在。Redis 重启/清库后 stream.orders 会丢，这里自动重建(MKSTREAM)，避免消费者 NOGROUP 死循环刷屏
+            stringRedisTemplate.execute((RedisCallback<Object>) connection ->
+                    connection.xGroupCreate("stream.orders".getBytes(StandardCharsets.UTF_8),
+                            "g1", ReadOffset.from("0"), true));
+        } catch (Exception e) {
+            // 组已存在会抛 BUSYGROUP，属正常，忽略
+            log.info("消费组已存在，无需重建: {}", e.getMessage());
+        }
         SECKILL_ORDER_EXECUTOR.submit(new VoucherOrderHandler());
     }
 

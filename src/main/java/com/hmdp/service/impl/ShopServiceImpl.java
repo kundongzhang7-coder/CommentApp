@@ -4,6 +4,7 @@ import cn.hutool.core.util.BooleanUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.Shop;
@@ -12,12 +13,21 @@ import com.hmdp.service.IShopService;
 import com.hmdp.utils.CacheClient;
 import com.hmdp.utils.RedisConstants;
 import com.hmdp.utils.RedisData;
+import com.hmdp.utils.SystemConstants;
+import jodd.util.StringUtil;
+import lombok.val;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.geo.Distance;
+import org.springframework.data.geo.GeoResult;
+import org.springframework.data.geo.GeoResults;
+import org.springframework.data.redis.connection.RedisGeoCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.domain.geo.GeoReference;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -218,6 +228,129 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
         stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
         //3.返回更新结果
         return Result.ok();
+    }
+
+    /**
+     * 排序方式：按评论数（人气）
+     */
+    private static final String SORT_BY_COMMENTS = "comments";
+    /**
+     * 排序方式：按评分
+     */
+    private static final String SORT_BY_SCORE = "score";
+    /**
+     * 附近商铺的检索半径，单位：米
+     */
+    private static final int GEO_SEARCH_RADIUS_METERS = 5000;
+
+    @Override
+    public Result queryShopByType(Integer typeId, Integer current, Double x, Double y, String sortBy) {
+        //1.判断是否需要根据坐标查询
+        if (x == null || y == null) {
+            //不需要坐标：直接数据库分页；指定了排序方式就按人气/评分倒序
+            String orderColumn = null;
+            if (SORT_BY_COMMENTS.equals(sortBy)) {
+                orderColumn = "comments";
+            } else if (SORT_BY_SCORE.equals(sortBy)) {
+                orderColumn = "score";
+            }
+            Page<Shop> page;
+            if (orderColumn == null) {
+                page = query()
+                        .eq("type_id", typeId)
+                        .page(new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE));
+            } else {
+                page = query()
+                        .eq("type_id", typeId)
+                        .orderByDesc(orderColumn)
+                        .page(new Page<>(current, SystemConstants.DEFAULT_PAGE_SIZE));
+            }
+            // 返回数据
+            return Result.ok(page.getRecords());
+        }
+
+        //2.计算分页参数
+        int from = (current - 1) * SystemConstants.DEFAULT_PAGE_SIZE;
+        int end = current * SystemConstants.DEFAULT_PAGE_SIZE;
+
+        //3.查询Redis，按距离取出半径内的商铺
+        String key = SHOP_GEO_KEY + typeId;
+        //按距离排序时只要前 end 条即可；按人气/评分排时必须把半径内全部取出来，才能在内存里排序
+        //只有明确要求按人气/评分时才走内存排序，其余情况（空串、未知值）一律按距离
+        boolean sortByDistance = !SORT_BY_COMMENTS.equals(sortBy) && !SORT_BY_SCORE.equals(sortBy);
+        RedisGeoCommands.GeoRadiusCommandArgs args = RedisGeoCommands.GeoRadiusCommandArgs
+                .newGeoRadiusArgs()
+                .includeDistance()
+                .sortAscending();
+        if (sortByDistance) {
+            args.limit(end);
+        }
+        GeoResults<RedisGeoCommands.GeoLocation<String>> results = stringRedisTemplate.opsForGeo()
+                .search(key, GeoReference.fromCoordinate(x, y), new Distance(GEO_SEARCH_RADIUS_METERS), args);
+
+        //4.解析出ID和距离
+        if (results == null) return Result.ok(Collections.emptyList());
+        List<GeoResult<RedisGeoCommands.GeoLocation<String>>> list = results.getContent();
+        if (list.size() <= from) return Result.ok(Collections.emptyList());
+        List<Long> ids = new ArrayList<>(list.size());
+        Map<String, Distance> distanceMap = new HashMap<>(list.size());
+        for (GeoResult<RedisGeoCommands.GeoLocation<String>> result : list) {
+            //4.1 获取shopId
+            String shopIdStr = result.getContent().getName();
+            ids.add(Long.valueOf(shopIdStr));
+            //4.2 获取distance
+            distanceMap.put(shopIdStr, result.getDistance());
+        }
+
+        //5.按距离排序：距离序就在 Redis 结果上按下标切片，再按 id 顺序回查
+        if (sortByDistance) {
+            List<Long> pageIds = ids.subList(from, Math.min(end, ids.size()));
+            return Result.ok(queryShopsByIdOrder(pageIds, distanceMap));
+        }
+
+        //6.按人气/评分排序：半径内的商铺全部查回来，在内存里排好序再切片
+        List<Shop> shops = query().in("id", ids).list();
+        Comparator<Shop> comparator;
+        if (SORT_BY_COMMENTS.equals(sortBy)) {
+            comparator = Comparator.comparing(Shop::getComments,
+                    Comparator.nullsLast(Comparator.<Integer>reverseOrder()));
+        } else {
+            comparator = Comparator.comparing(Shop::getScore,
+                    Comparator.nullsLast(Comparator.<Integer>reverseOrder()));
+        }
+        //同分时再按 id 升序，保证翻页稳定，不会重复或漏掉商铺
+        shops.sort(comparator.thenComparing(Shop::getId));
+        if (shops.size() <= from) {
+            return Result.ok(Collections.emptyList());
+        }
+        List<Shop> pageShops = new ArrayList<>(shops.subList(from, Math.min(end, shops.size())));
+        fillDistance(pageShops, distanceMap);
+        return Result.ok(pageShops);
+    }
+
+    /**
+     * 按给定的 id 顺序查回商铺（ORDER BY FIELD 保证顺序），并回填距离
+     */
+    private List<Shop> queryShopsByIdOrder(List<Long> ids, Map<String, Distance> distanceMap) {
+        if (ids.isEmpty()) {
+            return Collections.emptyList();
+        }
+        String idStr = StrUtil.join(",", ids);
+        List<Shop> shops = query().in("id", ids).last("ORDER BY FIELD(id, " + idStr + ")").list();
+        fillDistance(shops, distanceMap);
+        return shops;
+    }
+
+    /**
+     * 把 Redis 里的距离值塞回商铺对象，前端直接拿来展示
+     */
+    private void fillDistance(List<Shop> shops, Map<String, Distance> distanceMap) {
+        for (Shop shop : shops) {
+            Distance distance = distanceMap.get(shop.getId().toString());
+            if (distance != null) {
+                shop.setDistance(distance.getValue());
+            }
+        }
     }
 
     /**

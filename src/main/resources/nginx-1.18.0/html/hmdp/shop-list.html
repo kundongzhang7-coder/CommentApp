@@ -83,7 +83,9 @@
     el: "#app",
     data: {
       util,
-      isReachBottom: false,
+      loading: false,   // 是否正在请求中，防止并发重复请求
+      noMore: false,    // 是否已经没有更多数据
+      seq: 0,           // 请求序号，用来丢弃过期响应
       types: [], // 类型列表
       shops: [], // 商店列表
       typeName: "",
@@ -115,28 +117,62 @@
             this.$message.error(err)
           })
       },
-      queryShops() {
+      queryShops(isReset) {
+        // 1.切分类/换排序时：页码回第1页，清空已加载列表
+        if (isReset) {
+          this.params.current = 1;
+          this.shops = [];
+          this.noMore = false;
+          this.loading = false;
+        }
+        // 2.正在请求 或 已经没有更多，直接返回，避免重复发请求
+        if (this.loading || this.noMore) {
+          return
+        }
+        // 3.本次请求的自增序号，响应回来时序号不一致说明已被新请求取代，丢弃
+        const seq = ++this.seq;
+        this.loading = true;
         axios.get("/shop/of/type", {
             params: this.params
           })
           .then(({data}) => {
-            if (!data) {
+            if (seq !== this.seq) {
+              return
+            }
+            this.loading = false;
+            if (!data || data.length === 0) {
+              this.noMore = true;
               return
             }
             data.forEach(s => s.images = s.images.split(',')[0]);
             this.shops = this.shops.concat(data);
+            // 4.这一页还没把容器撑满的话，用户根本滚不动，自动再取下一页
+            this.$nextTick(() => this.checkFill());
           })
           .catch(err => {
+            this.loading = false;
             console.log(err);
             this.$message.error(err)
           })
+      },
+      checkFill() {
+        const el = this.$el.querySelector(".shop-list");
+        if (!el) {
+          return
+        }
+        // 内容高度 <= 容器高度，没有滚动条，补一页
+        if (el.scrollHeight <= el.offsetHeight + 1 && !this.noMore) {
+          this.params.current++;
+          this.queryShops();
+        }
       },
       handleCommand(t) {
         location.href = "/shop-list.html?type="+t.id+"&name="+t.name;
       },
       sortAndQuery(sortBy) {
         this.params.sortBy = sortBy;
-        this.queryShops();
+        // 换排序方式就是一次全新查询：页码归1、清空旧列表、重新拉第一页
+        this.queryShops(true);
       },
       goBack() {
         history.back();
@@ -145,16 +181,17 @@
         location.href = "/shop-detail.html?id="+id
       },
       onScroll(e) {
+        // 正在加载 或 已经到底 时，忽略滚动事件
+        if (this.loading || this.noMore) {
+          return
+        }
         let scrollTop = e.target.scrollTop;
         let offsetHeight = e.target.offsetHeight;
         let scrollHeight = e.target.scrollHeight;
-        if(scrollTop + offsetHeight + 1 > scrollHeight && !this.isReachBottom){
-          this.isReachBottom = true
-          console.log("触底")
+        // 距底部 1px 以内算触底，取下一页
+        if(scrollTop + offsetHeight + 1 >= scrollHeight){
           this.params.current++
-          this.queryShops(this.params.current, 5);
-        }else{
-          this.isReachBottom = false
+          this.queryShops();
         }
       },
     }

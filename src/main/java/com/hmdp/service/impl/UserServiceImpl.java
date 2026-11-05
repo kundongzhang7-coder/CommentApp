@@ -128,4 +128,21 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         return user;
     }
 
+    /**
+     * 根据id查询用户信息
+     */
+    @Override
+    public Result queryUserById(Long id) {
+        //1.根据id查询用户
+        User user = getById(id);
+        //2.用户不存在，返回失败
+        if (user == null) {
+            return Result.fail("用户不存在");
+        }
+        //3.转为UserDTO（只暴露id、昵称、头像，不把手机号等敏感信息返回给前端）
+        UserDTO userDTO = BeanUtil.copyProperties(user, UserDTO.class);
+        //4.返回
+        return Result.ok(userDTO);
+    }
+
 }

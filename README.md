@@ -2,11 +2,11 @@
 
 > **骨架来源**：本项目基于 B 站[黑马程序员 Redis 教程](https://www.bilibili.com/video/BV1cr4y1671t)实战篇的 hmdp 项目（[原仓库](https://github.com/cs001020/hmdp)）二次开发。
 > 保留的是原项目的业务模型、表结构与秒杀主链路（Redis Lua 预扣库存 + Redis Stream 异步落库 + Redisson 用户级锁）；
-> 在此基础上补的是教程没有覆盖、但真实系统必须有的一层：**接口限流、落库失败补偿、消费重试边界、缓存雪崩防护、可观测性**。
-> 下表所有数字都是本机单节点实测（MySQL + Redis 7.4 + Spring Boot 2.7.4），不是估算值。
+> 在此基础上补的是教程没有覆盖、但真实系统必须有的一层：**接口限流、落库失败补偿、消费重试边界、缓存雪崩防护、可观测性**；
+> 同时把整套依赖升级到当前主流版本（Spring Boot 3.5 + JDK 17，见第六节）。
+> 下表所有数字都是本机单节点实测（MySQL + Redis 7.4 + Spring Boot 3.5.16 + JDK 26 运行时），不是估算值。
 
 ## 一、相对原项目改了什么
-
 | # | 原实现的问题 | 现在的做法 | 代码位置 |
 |---|---|---|---|
 | 1 | 秒杀、登录、验证码接口都没有频率限制，脚本可无限刷 | 通用 Redis 滑动窗口限流器，一次 Lua 完成"清理 → 计数 → 判定 → 记账 → 续期"；秒杀按「用户+券」10 次/10 秒，登录按 IP 10 次/10 分钟，验证码按手机号 60 秒 1 次 | `utils/RedisRateLimiter.java`、`resources/lua/rate_limit*.lua` |
@@ -28,7 +28,7 @@
 | 秒杀用户限流 | 同一用户对同一张券连打 12 次 | 第 1 次返回订单号；第 2~10 次「请勿重复下单」；第 11~12 次「手速太快了，请稍后再试」 |
 | 正常链路一致性 | 1 次成功秒杀 | Redis 库存 199→198、DB 库存 198、订单落库、`XPENDING=0` |
 | 失败补偿 | 把 DB 库存置 0 而 Redis 保留 5，触发一次秒杀 | 落库失败 → Redis 库存回到 5、一人一单集合清空、写入 `order:fail:{orderId}`、DB 订单数不变 |
-| 缓存抖动 | 连续查询 4 个不同店铺 | TTL 分别为 1825 / 1828 / 1813 / 1830 秒（基准 1800 + 0~60 抖动） |
+| 缓存抖动 | 连续查询 4 个不同店铺 | TTL 各不相同：Boot 2.7 首测 1825 / 1828 / 1813 / 1830，Boot 3.5 复测 1817 / 1841 / 1847 / 1839（基准 1800 + 0~60 抖动） |
 | 健康检查 | `GET /actuator/health` | `status=UP`，db / redis / ping 均为 UP |
 
 ## 三、本地启动
@@ -59,7 +59,33 @@
 
 ---
 
-## 五、原始教程说明（保留）
+## 五、依赖版本升级（2026-11）
+
+| 组件 | 升级前 | 升级后 |
+|---|---|---|
+| Spring Boot | 2.7.4 | **3.5.16** |
+| JDK | properties 写 source/target 8、插件里又写 16 | **release 17**（JDK 17 及以上均可编译运行） |
+| MyBatis-Plus | mybatis-plus-boot-starter 3.5.2 | **mybatis-plus-spring-boot3-starter 3.5.12** |
+| Redisson | 3.16.3 | **3.52.0**（不用 starter，避免自动配置再多出一个默认客户端） |
+| Hutool | 5.8.8 | **5.8.48** |
+| MySQL 驱动 | mysql:mysql-connector-java | **com.mysql:mysql-connector-j**（版本由 Boot BOM 管理） |
+| 可观测性 | 无 | **spring-boot-starter-actuator**（版本由 BOM 管理） |
+| Lombok | 隐式 1.18.x | **1.18.48**，显式挂 `annotationProcessorPaths` |
+
+只改 pom 是起不来的，版本升级必须同步处理这四点：
+
+1. **`javax.*` → `jakarta.*`**：`javax.servlet.http.HttpServletRequest/HttpSession/HttpServletResponse` 与 `javax.annotation.Resource/PostConstruct`，涉及 14 个文件（两个拦截器、各 Controller、Service 实现、限流器、IP 解析器）。
+2. **配置前缀 `spring.redis.*` → `spring.data.redis.*`**：不改密码不生效，启动即 `NOAUTH Authentication required`。
+3. **MyBatis-Plus 换 boot3 专用 starter**（artifactId 已变）；并且 3.5.9 之后 `PaginationInnerInterceptor` 依赖的 jsqlparser 被拆包，需额外引入 `mybatis-plus-jsqlparser`，否则分页查询 `NoClassDefFoundError`。
+4. **Lombok 显式声明注解处理器**：JDK 23 起 javac 不再自动发现 classpath 上的 processor，不配 `annotationProcessorPaths` 时所有 `@Data` 实体会报「找不到 getXxx()」。
+
+为什么不升 Spring Boot 4.x：本项目依赖 MyBatis-Plus 的 boot3 starter，Boot 4 对应 Spring Framework 7，MyBatis-Plus 目前没有 boot4 适配，升上去会直接卡在持久层。3.5.x 是当前企业落地最广的一条线。
+
+> 对了，MyBatis-Plus 3.5.18 把 `IService/ServiceImpl` 迁到了 `com.baomidou.mybatisplus.spring.service`，会迫使重写十几个 service 的 import，因此刻意停在 3.5.12：既在 Boot 3 的适配线上，又保住原有包结构。
+
+升级后按第二节同一套用例复测（结果一致）：验证码第 2 次被拦、登录同 IP 第 11 次「操作过于频繁」（`limit:login:ip:0:0:0:0:0:0:0:1` 的 ZCARD=10，顺便印证 IP 归一化对 IPv6 本机地址生效）、秒杀第 1 次拿到订单号其余被拦、DB 库存与 Redis 库存一致、故障注入后 Redis 回到 5 且订单数不变、TTL 抖动 1817/1841/1847/1839 秒、`XPENDING=0`、`/actuator/health` 的 db/redis/ping 全 UP。
+
+## 六、原始教程说明（保留）
 
 项目代码包含 2 个分支：
 - master : 主分支，包含完整版代码，作为大家的编码参考使用

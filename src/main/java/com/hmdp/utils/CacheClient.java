@@ -11,8 +11,10 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.time.Duration;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 
@@ -25,8 +27,18 @@ public class CacheClient {
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
 
+    /**
+     * TTL 随机抖动上限（秒）。
+     * <p>
+     * 同一批热点 key 往往在同一时刻被写入（批量预热、服务重启后首次访问等），
+     * 固定 TTL 会让它们在同一个秒集体失效，造成瞬时穿透打满数据库。
+     * 加 0~60s 抖动把失效时刻打散，是"缓存雪崩"最便宜的解法。
+     */
+    private static final long TTL_JITTER_SECONDS = 60;
+
     public void set(String key, Object value, Long time, TimeUnit unit) {
-        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), time, unit);
+        long ttlSeconds = unit.toSeconds(time) + ThreadLocalRandom.current().nextLong(TTL_JITTER_SECONDS);
+        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(value), Duration.ofSeconds(ttlSeconds));
     }
 
     public void setWithLogicalExpire(String key, Object value, Long time, TimeUnit unit) {

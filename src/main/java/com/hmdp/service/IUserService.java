@@ -5,6 +5,7 @@ import com.hmdp.dto.LoginFormDTO;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.User;
 
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpSession;
 
 /**
@@ -25,8 +26,9 @@ public interface IUserService extends IService<User> {
     /**
      * 登录功能
      * @param loginForm 登录参数，包含手机号、验证码；或者手机号、密码
+     * @param request   用于解析真实客户端 IP（仅在直连地址可信时才采信 X-Forwarded-For）
      */
-    Result login(LoginFormDTO loginForm, HttpSession session);
+    Result login(LoginFormDTO loginForm, HttpSession session, HttpServletRequest request);
 
     /**
      * 根据id查询用户信息（用于点击头像进入博主首页）

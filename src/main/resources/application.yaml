@@ -25,3 +25,32 @@ mybatis-plus:
 logging:
   level:
     com.hmdp: debug
+
+# 可观测性：只暴露健康检查与基本信息，避免把 env 等敏感端点开到公网
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: always
+
+# 安全加固参数（口令全部可通过环境变量覆盖，无需改代码）
+hmdp:
+  redis:
+    # 教程里演示多节点用的 2、3 号 Redisson 客户端默认关闭，
+    # 否则只跑单节点 Redis 的环境会因连不上 6380/6381 而启动失败
+    extra-nodes-enabled: false
+  security:
+    # 可信反向代理地址，支持精确 IP 与 CIDR。为空表示"没有反向代理"，
+    # 此时完全忽略 X-Forwarded-For，只用 remoteAddr，避免伪造头绕过限流
+    trusted-proxies: ${TRUSTED_PROXIES:}
+    # 登录接口：同一 IP 在 10 分钟内最多尝试 10 次
+    login-ip-max: 10
+    login-window-minutes: 10
+    # 同一手机号失败次数达到该值只打告警日志，不锁定（避免被恶意刷数锁死正常用户）
+    login-user-alarm-threshold: 20
+    # 秒杀接口：同一用户对同一张券 10 秒内最多请求 10 次
+    seckill-user-max: 10
+    seckill-window-seconds: 10

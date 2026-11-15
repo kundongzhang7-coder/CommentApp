@@ -13,6 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpSession;
 
 /**
@@ -48,9 +49,9 @@ public class UserController {
      * @param loginForm 登录参数，包含手机号、验证码；或者手机号、密码
      */
     @PostMapping("/login")
-    public Result login(@RequestBody LoginFormDTO loginForm, HttpSession session){
-        // 实现登录功能
-        return userService.login(loginForm, session);
+    public Result login(@RequestBody LoginFormDTO loginForm, HttpSession session, HttpServletRequest request){
+        // 实现登录功能（传入 request 以便按真实客户端 IP 做限流）
+        return userService.login(loginForm, session, request);
     }
 
     /**

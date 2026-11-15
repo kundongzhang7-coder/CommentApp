@@ -11,6 +11,9 @@ import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.UserMapper;
 import com.hmdp.service.IUserService;
+import com.hmdp.config.SecurityProperties;
+import com.hmdp.utils.ClientIpResolver;
+import com.hmdp.utils.RedisRateLimiter;
 import com.hmdp.utils.RegexUtils;
 import com.hmdp.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
@@ -19,7 +22,9 @@ import org.springframework.data.redis.connection.BitFieldSubCommands;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpSession;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
@@ -44,6 +49,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
 
+    @Autowired
+    private RedisRateLimiter rateLimiter;
+
+    @Autowired
+    private SecurityProperties securityProperties;
+
     /**
      * 发送手机验证码
      */
@@ -53,6 +64,14 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         if (RegexUtils.isPhoneInvalid(phone)) {
             //2.如果不符合返回错误信息
             return Result.fail("手机号格式无效");
+        }
+
+        //2.1 同一手机号 60 秒内只允许发送一次：避免接口被当成短信轰炸入口（setIfAbsent 本身是原子的）
+        Boolean allow = stringRedisTemplate.opsForValue()
+                .setIfAbsent(LIMIT_CODE_KEY + phone, "1", LIMIT_CODE_TTL, TimeUnit.SECONDS);
+        if (!Boolean.TRUE.equals(allow)) {
+            log.warn("验证码请求过于频繁 phone={}", phone);
+            return Result.fail("验证码发送过于频繁，请稍后再试");
         }
 
         //3.符合要求，生成验证码
@@ -73,19 +92,36 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
      * @param loginForm 登录参数，包含手机号、验证码；或者手机号、密码
      */
     @Override
-    public Result login(LoginFormDTO loginForm, HttpSession session) {
+    public Result login(LoginFormDTO loginForm, HttpSession session, HttpServletRequest request) {
         String phone = loginForm.getPhone();
         //1.校验手机号
         if (RegexUtils.isPhoneInvalid(phone)) {
             return Result.fail("手机号格式无效");
         }
 
+        //1.1 IP 维度滑动窗口硬拦截：伪造 X-Forwarded-For 无效（只有直连地址命中可信代理白名单才采信转发头）
+        String clientIp = ClientIpResolver.resolve(request, securityProperties.getTrustedProxies());
+        boolean allowed = rateLimiter.tryAcquire(
+                LIMIT_LOGIN_IP_KEY + clientIp,
+                securityProperties.getLoginIpMax(),
+                Duration.ofMinutes(securityProperties.getLoginWindowMinutes()));
+        if (!allowed) {
+            log.warn("登录接口触发 IP 限流 ip={} phone={}", clientIp, phone);
+            return Result.fail("操作过于频繁，请稍后再试");
+        }
+
         //2.从redis获取验证码并校验
         Object cashedCode = stringRedisTemplate.opsForValue().get(LOGIN_CODE_KEY + phone);
         String code = loginForm.getCode();
 
-        //3.不一致，报错
+        //3.不一致，报错（手机号维度只记账告警，不锁定，避免他人恶意刷数把正常用户锁死）
         if (cashedCode == null || !cashedCode.equals(code)) {
+            long failCount = rateLimiter.record(
+                    LIMIT_LOGIN_USER_KEY + phone,
+                    Duration.ofMinutes(securityProperties.getLoginWindowMinutes()));
+            if (failCount >= securityProperties.getLoginUserAlarmThreshold()) {
+                log.warn("同一手机号登录失败次数偏高 phone={} count={}", phone, failCount);
+            }
             return Result.fail("验证码错误");
         }
 
@@ -115,6 +151,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
 
         //7.4设置redis缓存的过期时间
         stringRedisTemplate.expire(tokenKey, LOGIN_USER_TTL, TimeUnit.MINUTES);
+
+        //7.5验证码一次性消费：登录成功立即删除，避免同一个码被重复使用
+        stringRedisTemplate.delete(LOGIN_CODE_KEY + phone);
+
+        //7.6登录成功只清"手机号维度"的失败计数，IP 维度计数不清（否则攻击者可借一次成功登录重置整个出口 IP 的额度）
+        rateLimiter.reset(LIMIT_LOGIN_USER_KEY + phone);
 
         //8.返回token
         return Result.ok(token);

@@ -70,6 +70,11 @@
             <artifactId>redisson</artifactId>
             <version>3.16.3</version>
         </dependency>
+        <!--actuator：暴露 /actuator/health，供容器编排探活与压测前健康检查-->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
